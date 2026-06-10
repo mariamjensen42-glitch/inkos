@@ -1,28 +1,23 @@
-node_modules/
-dist/
+# Build artifacts
+/bin/
+/dist/
+/inkos-api
+
+# Local env
 .env
 .env.local
-.npmrc
-*.tgz
-.DS_Store
-coverage/
-.turbo/
-_notes/
-_tmp_*
-test-project/
-.venv*/
-.gstack/
-.worktrees/
-docs/*
-novel-to-comic-research.docx
-.pnpm-store/
-tmp/
-autoresearch/
-.playwright-cli/
-.superpowers/
-_*.md
 
-# 用户运行时数据（会话记录、书籍内容、项目密钥、提示词模板不属于项目代码）
+# Go
+*.test
+*.out
+coverage.txt
+
+# Editor
+.DS_Store
+.idea/
+.vscode/
+
+# User runtime data (project state files, not project code)
 .inkos/
 books/
 worlds/
