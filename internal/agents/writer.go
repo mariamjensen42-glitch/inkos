@@ -68,6 +68,12 @@ type WriterOptions struct {
 	Max         int
 }
 
+// CountWords returns a rough word count for the body. For CJK text this
+// is a simplified approximation: each Han char counts as 1; ASCII word
+// boundaries split English words. Exported so the pipeline package can
+// reuse it when computing chapter word counts after a revise pass.
+func CountWords(s string) int { return countWords(s) }
+
 // countWords returns a rough word count for the body. For CJK text this
 // is a simplified approximation: each Han char counts as 1; ASCII word
 // boundaries split English words.

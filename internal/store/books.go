@@ -356,3 +356,93 @@ func TruthFileName(name string) string {
 	}
 	return name
 }
+
+// --- Per-chapter runtime artifacts (story/runtime/) -------------------
+
+// intentFileName returns the chapter intent filename (e.g. "chapter-0001.intent.md").
+func intentFileName(num int) string {
+	return fmt.Sprintf("chapter-%04d.intent.md", num)
+}
+
+// composeFileName returns the composed-context filename (e.g. "chapter-0001.context.json").
+func composeFileName(num int) string {
+	return fmt.Sprintf("chapter-%04d.context.json", num)
+}
+
+// auditFileName returns the audit-result filename (e.g. "chapter-0001.audit.json").
+func auditFileName(num int) string {
+	return fmt.Sprintf("chapter-%04d.audit.json", num)
+}
+
+// IntentPath returns the absolute path to a chapter's intent file.
+func (s *BookStore) IntentPath(id string, num int) string {
+	return filepath.Join(s.RuntimeDir(id), intentFileName(num))
+}
+
+// ReadIntent reads a chapter's intent markdown. Returns os.ErrNotExist
+// if the file does not exist.
+func (s *BookStore) ReadIntent(id string, num int) (string, error) {
+	if !util.IsSafeBookID(id) {
+		return "", fmt.Errorf("unsafe book id")
+	}
+	data, err := os.ReadFile(s.IntentPath(id, num))
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+// WriteIntent writes a chapter's intent markdown atomically.
+func (s *BookStore) WriteIntent(id string, num int, body string) error {
+	if !util.IsSafeBookID(id) {
+		return fmt.Errorf("unsafe book id")
+	}
+	return WriteFileAtomic(s.IntentPath(id, num), []byte(body))
+}
+
+// ComposePath returns the absolute path to a chapter's composed-context file.
+func (s *BookStore) ComposePath(id string, num int) string {
+	return filepath.Join(s.RuntimeDir(id), composeFileName(num))
+}
+
+// ReadComposeContext reads a chapter's composed-context JSON. Returns
+// os.ErrNotExist if missing.
+func (s *BookStore) ReadComposeContext(id string, num int) (string, error) {
+	if !util.IsSafeBookID(id) {
+		return "", fmt.Errorf("unsafe book id")
+	}
+	data, err := os.ReadFile(s.ComposePath(id, num))
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+// WriteComposeContext writes a chapter's composed-context JSON atomically.
+func (s *BookStore) WriteComposeContext(id string, num int, body string) error {
+	if !util.IsSafeBookID(id) {
+		return fmt.Errorf("unsafe book id")
+	}
+	return WriteFileAtomic(s.ComposePath(id, num), []byte(body))
+}
+
+// AuditPath returns the absolute path to a chapter's audit-result file.
+func (s *BookStore) AuditPath(id string, num int) string {
+	return filepath.Join(s.RuntimeDir(id), auditFileName(num))
+}
+
+// ReadAuditResult reads a chapter's audit-result JSON.
+func (s *BookStore) ReadAuditResult(id string, num int) ([]byte, error) {
+	if !util.IsSafeBookID(id) {
+		return nil, fmt.Errorf("unsafe book id")
+	}
+	return os.ReadFile(s.AuditPath(id, num))
+}
+
+// WriteAuditResult writes a chapter's audit-result JSON atomically.
+func (s *BookStore) WriteAuditResult(id string, num int, body []byte) error {
+	if !util.IsSafeBookID(id) {
+		return fmt.Errorf("unsafe book id")
+	}
+	return WriteFileAtomic(s.AuditPath(id, num), body)
+}

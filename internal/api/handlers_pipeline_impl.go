@@ -1,62 +1,73 @@
-// Package api: pipeline handler implementation. These functions wire
-// the agent layer to the HTTP layer so the /write-next, /draft, /plan,
-// /compose, /audit, /revise endpoints actually invoke an LLM.
+// Package api: pipeline handler implementation helpers. These wrap the
+// internal/pipeline.Runner so the HTTP layer can fire-and-forget the
+// plan -> compose -> write -> audit -> revise state machine and return
+// 202 Accepted immediately. Progress is broadcast through the SSE
+// broadcaster, which clients subscribe to at GET /api/v1/events.
 package api
 
 import (
 	"context"
 	"errors"
-	"fmt"
 
-	"github.com/narcooo/inkos/internal/agents"
+	"github.com/gin-gonic/gin"
 	"github.com/narcooo/inkos/internal/llm"
+	"github.com/narcooo/inkos/internal/pipeline"
 )
 
-// pipelineCommonOptions are shared by all pipeline handlers.
-type pipelineCommonOptions struct {
-	Service string `json:"service"`
-	Words   int    `json:"words"`
-	Context string `json:"context"`
-	Extra   string `json:"extra"`
-	Audit   bool   `json:"audit"`
-	Revise  bool   `json:"revise"`
+// pipelineBroadcaster adapts api.Broadcaster to the pipeline.Broadcaster
+// interface.
+type pipelineBroadcaster struct{ b *Broadcaster }
+
+func (p *pipelineBroadcaster) PublishEvent(name string, data interface{}) {
+	if p == nil || p.b == nil {
+		return
+	}
+	p.b.PublishEvent(name, data)
 }
 
-// resolveLLM returns an LLM client for the requested service.
-func (s *Server) resolveLLM(service string) (*llm.Client, error) {
-	if s.ResolverFactory == nil {
-		return nil, errors.New("no resolver factory configured")
+// newRunner constructs a pipeline.Runner bound to the current server
+// dependencies. The resolver factory is captured by reference so that
+// if the server's resolver is reconfigured at runtime, subsequent
+// stages pick up the new resolver.
+func (s *Server) newRunner() *pipeline.Runner {
+	bc := &pipelineBroadcaster{b: s.Broadcaster}
+	rf := func() *llm.Resolver {
+		if s.ResolverFactory == nil {
+			return nil
+		}
+		return s.ResolverFactory()
 	}
-	resolver := s.ResolverFactory()
-	if resolver == nil {
-		return nil, errors.New("nil resolver")
-	}
-	client, _, err := resolver.Client(service)
-	if err != nil {
-		return nil, err
-	}
-	return client, nil
+	return pipeline.NewRunner(s.Books, s.Truth, s.Project, bc, rf)
 }
 
-// runAgent invokes the LLM and returns the assistant's reply text. The
-// book id is prepended for context if non-empty.
-func (s *Server) runAgent(ctx context.Context, sessionID, message, bookID, mode string) (string, error) {
-	client, err := s.resolveLLM("")
-	if err != nil {
-		return "", err
+// errNoResolver is returned by handlers when the project has no
+// configured LLM and a pipeline stage requires one. Surfaced to the
+// client as a 400 LLM_CONFIG_ERROR.
+var errNoResolver = errors.New("no LLM resolver configured for the active project")
+
+// resolveChapterNumber reads the chapter number from the request body
+// (preferred) or falls back to NextChapterNumber. If neither is
+// available, returns 0.
+func (s *Server) resolveChapterNumber(c *gin.Context, bookID string, bodyChapter int) (int, error) {
+	if bodyChapter > 0 {
+		return bodyChapter, nil
 	}
-	user := message
-	if bookID != "" {
-		user = fmt.Sprintf("[book: %s] %s", bookID, message)
-	}
-	writer := agents.NewWriter()
-	res, err := writer.Run(ctx, client, user, &agents.WriterOptions{
-		System: "You are InkOS, an assistant for novelists.",
-	})
-	if err != nil {
-		return "", err
-	}
-	_ = sessionID
-	_ = mode
-	return res.Body, nil
+	return s.Books.NextChapterNumber(bookID)
+}
+
+// detach runs fn in a background goroutine and reports the outcome
+// through the SSE broadcaster as pipeline:<stage>:error on failure.
+// The caller's HTTP response is unaffected.
+func (s *Server) detach(stage string, bookID string, chapter int, fn func(ctx context.Context) error) {
+	go func() {
+		ctx := context.Background()
+		if err := fn(ctx); err != nil {
+			s.Broadcaster.PublishEvent("pipeline:"+stage+":error", gin.H{
+				"bookId":  bookID,
+				"chapter": chapter,
+				"stage":   stage,
+				"error":   err.Error(),
+			})
+		}
+	}()
 }

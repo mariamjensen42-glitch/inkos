@@ -46,11 +46,22 @@ func (b *Broadcaster) Subscribe(buffer int) (<-chan SSEEvent, func()) {
 // Publish non-blockingly sends the event to all subscribers. Slow
 // subscribers get their messages dropped to keep the broadcaster fast.
 func (b *Broadcaster) Publish(ev SSEEvent) {
+	b.publish(ev.Event, ev.Data)
+}
+
+// PublishEvent is a convenience wrapper for callers that don't want to
+// construct an SSEEvent literal. It satisfies the
+// pipeline.Broadcaster interface (Publish(name, data)).
+func (b *Broadcaster) PublishEvent(name string, data interface{}) {
+	b.publish(name, data)
+}
+
+func (b *Broadcaster) publish(name string, data interface{}) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	for ch := range b.subs {
 		select {
-		case ch <- ev:
+		case ch <- SSEEvent{Event: name, Data: data}:
 		default:
 			// drop
 		}
