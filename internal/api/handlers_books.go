@@ -1,12 +1,15 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/narcooo/inkos/internal/agents"
 	"github.com/narcooo/inkos/internal/model"
 )
 
@@ -74,9 +77,9 @@ type handleCreateBookRequest struct {
 	Brief           string `json:"brief"`
 }
 
-// handleCreateBook creates a new book and (in the full implementation)
-// kicks off the architect agent to produce book foundation. In this
-// skeleton it writes the config and seeds the story/ skeleton.
+// handleCreateBook creates a new book and kicks off the architect agent
+// to produce the 5 foundation files. Progress is tracked via
+// ArchitectProgressStore and published via SSE.
 //   POST /api/v1/books/create
 func (s *Server) handleCreateBook(c *gin.Context) {
 	var req handleCreateBookRequest
@@ -99,17 +102,18 @@ func (s *Server) handleCreateBook(c *gin.Context) {
 	}
 	now := nowISO()
 	cfg := &model.BookConfig{
-		ID:               id,
-		Title:            req.Title,
-		Genre:            model.Genre(req.Genre),
-		Language:         req.Language,
-		Platform:         model.Platform(req.Platform),
+		ID:              id,
+		Title:           req.Title,
+		Genre:           model.Genre(req.Genre),
+		Language:        req.Language,
+		Platform:        model.Platform(req.Platform),
 		ChapterWordCount: req.ChapterWordCount,
-		TargetChapters:   req.TargetChapters,
-		Status:           model.BookStatusActive,
-		Blurb:            req.Blurb,
-		CreatedAt:        now,
-		UpdatedAt:        now,
+		TargetChapters:  req.TargetChapters,
+		Status:          model.BookStatusActive,
+		Blurb:           req.Blurb,
+		Brief:           req.Brief,
+		CreatedAt:       now,
+		UpdatedAt:       now,
 	}
 	if err := createBookOnDisk(s.Root, cfg); err != nil {
 		AbortWithError(c, err)
@@ -119,14 +123,130 @@ func (s *Server) handleCreateBook(c *gin.Context) {
 		AbortWithError(c, err)
 		return
 	}
+
+	// Initialize progress state.
+	s.ArchProgress.Set(&ArchitectProgress{
+		BookID:    id,
+		Phase:     ArchitectPhaseStarting,
+		Message:   "Book created, starting architect agent...",
+		StartedAt: now,
+	})
+
 	s.Broadcaster.Publish(SSEEvent{Event: "book:creating", Data: gin.H{"bookId": id, "title": req.Title}})
-	// Run the architect agent in the background; in the skeleton this
-	// just emits a progress event.
-	go func() {
-		// TODO: run architect agent here.
-		s.Broadcaster.Publish(SSEEvent{Event: "book:created", Data: gin.H{"bookId": id}})
-	}()
+
+	// Run the architect agent in the background.
+	go s.runArchitect(id, cfg)
+
 	c.JSON(http.StatusOK, gin.H{"id": id, "status": "creating"})
+}
+
+// runArchitect launches the architect agent for a book and tracks progress.
+func (s *Server) runArchitect(bookID string, cfg *model.BookConfig) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	if s.ResolverFactory == nil {
+		now := time.Now().UTC().Format(time.RFC3339)
+		s.ArchProgress.Set(&ArchitectProgress{
+			BookID:    bookID,
+			Phase:     ArchitectPhaseError,
+			Message:   "LLM resolver not configured",
+			Error:     "no LLM resolver factory set",
+			StartedAt: now,
+		})
+		s.Broadcaster.Publish(SSEEvent{
+			Event: "architect:error",
+			Data:  gin.H{"bookId": bookID, "error": "no LLM resolver configured"},
+		})
+		return
+	}
+
+	storyDir := filepath.Join(s.Books.BookDir(bookID), "story")
+
+	resolver := s.ResolverFactory()
+	arch := agents.NewArchitect(resolver)
+
+	input := agents.ArchitectInput{
+		Title:           cfg.Title,
+		Genre:           string(cfg.Genre),
+		Language:        cfg.Language,
+		Platform:        string(cfg.Platform),
+		Blurb:           cfg.Blurb,
+		Brief:           cfg.Brief,
+		ChapterWordCount: cfg.ChapterWordCount,
+		TargetChapters:  cfg.TargetChapters,
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	arch.Run(ctx, input, storyDir, func(phase, file string, err error) {
+		switch phase {
+		case "start":
+			s.ArchProgress.Set(&ArchitectProgress{
+				BookID:    bookID,
+				Phase:     ArchitectPhaseStarting,
+				Message:   "Architect agent started",
+				StartedAt: now,
+			})
+			s.Broadcaster.Publish(SSEEvent{
+				Event: "architect:start",
+				Data:  gin.H{"bookId": bookID, "phase": "start"},
+			})
+		case "planning":
+			s.ArchProgress.Set(&ArchitectProgress{
+				BookID:    bookID,
+				Phase:     ArchitectPhasePlanning,
+				Message:   "Architect is planning the foundation...",
+				StartedAt: now,
+			})
+		case "file":
+			s.ArchProgress.Set(&ArchitectProgress{
+				BookID:      bookID,
+				Phase:       ArchitectPhaseFileGen,
+				Message:     "Generating " + file,
+				CurrentFile:  file,
+				StartedAt:   now,
+			})
+			s.Broadcaster.Publish(SSEEvent{
+				Event: "architect:file",
+				Data:  gin.H{"bookId": bookID, "file": file},
+			})
+		case "done":
+			s.ArchProgress.Set(&ArchitectProgress{
+				BookID:    bookID,
+				Phase:     ArchitectPhaseDone,
+				Message:   "Foundation complete",
+				StartedAt: now,
+			})
+			s.Broadcaster.Publish(SSEEvent{
+				Event: "book:created",
+				Data:  gin.H{"bookId": bookID},
+			})
+			s.Broadcaster.Publish(SSEEvent{
+				Event: "architect:done",
+				Data:  gin.H{"bookId": bookID},
+			})
+		case "error":
+			s.ArchProgress.Set(&ArchitectProgress{
+				BookID:    bookID,
+				Phase:     ArchitectPhaseError,
+				Message:   "Architect failed",
+				Error:     err.Error(),
+				StartedAt: now,
+			})
+			s.Broadcaster.Publish(SSEEvent{
+				Event: "architect:error",
+				Data:  gin.H{"bookId": bookID, "error": err.Error()},
+			})
+		case "retry":
+			s.ArchProgress.Set(&ArchitectProgress{
+				BookID:    bookID,
+				Phase:     ArchitectPhasePlanning,
+				Message:   "Architect retrying after failure...",
+				StartedAt: now,
+			})
+		}
+	})
 }
 
 // handleUpdateBook updates mutable book fields.
@@ -171,6 +291,21 @@ func (s *Server) handleDeleteBook(c *gin.Context) {
 //   GET /api/v1/books/:id/create-status
 func (s *Server) handleCreateStatus(c *gin.Context) {
 	id := c.Param("id")
+	progress := s.ArchProgress.Get(id)
+	if progress != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"bookId":      id,
+			"status":      string(progress.Phase),
+			"phase":       string(progress.Phase),
+			"message":     progress.Message,
+			"currentFile": progress.CurrentFile,
+			"error":       progress.Error,
+			"startedAt":   progress.StartedAt,
+			"updatedAt":   progress.UpdatedAt,
+		})
+		return
+	}
+	// Fallback: check if book exists on disk.
 	cfg, err := s.Books.LoadBookConfig(id)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"status": "unknown"})

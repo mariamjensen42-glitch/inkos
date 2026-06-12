@@ -14,6 +14,7 @@ type Server struct {
 	Books       *store.BookStore
 	Truth       *store.TruthStore
 	Broadcaster *Broadcaster
+	ArchProgress *ArchitectProgressStore
 
 	// Lazy LLM resolver — re-built when project config is reloaded.
 	ResolverFactory func() *llm.Resolver
@@ -27,6 +28,7 @@ func NewServer(root string) *Server {
 		Books:       store.NewBookStore(root),
 		Truth:       store.NewTruthStore(root),
 		Broadcaster: NewBroadcaster(),
+		ArchProgress: NewArchitectProgressStore(),
 	}
 }
 
